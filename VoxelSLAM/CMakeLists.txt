@@ -45,6 +45,9 @@ include_directories(
 add_executable(voxelslam src/voxelslam.cpp src/BTC.cpp)
 target_link_libraries(voxelslam ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtsam)
 
+add_executable(voxel_offline_pgo src/voxel_offline_pgo.cpp src/BTC.cpp)
+target_link_libraries(voxel_offline_pgo ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtsam)
+
 
 
 

@@ -1,0 +1,75 @@
+General:
+  # 根据当前运行的session修改topic
+  lid_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"  
+  # The file path of the map to be saved
+  save_path: "/root/FASTLIO/Voxel-SLAM_LVIG/Island/"
+  # The offline map in the save_path to be loaded
+  # The number after the map name is the threshold for loop
+  # '#' means the map is not loaded
+  # 运行顺序：alpha -> bob -> carol
+  # 运行alpha时：previous_map为空或注释掉
+  # 运行bob时：previous_map: "alpha: 0.50"
+  # 运行carol时：previous_map: "alpha: 0.50, bob: 0.45"
+  # previous_map: ""
+  previous_map: "session_0: 0.50"
+  # previous_map: "alpha: 0.50, bob: 0.5"
+  # The session name session_0 session_1 session_2
+  bagname: "session_1"
+  lidar_type: 0  # velodyne
+  blind: 0.5
+  point_filter_num: 3
+  extrinsic_tran: [0.04165, 0.02326, -0.0284]
+  extrinsic_rota: [1, 0, 0,
+                   0, 1, 0,
+                   0, 0, 1] 
+  # The session is saved in save_path + bagname
+  is_save_map: 1
+
+Odometry:
+  cov_gyr: 0.01
+  cov_acc: 1
+  rdw_gyr: 0.0001
+  rdw_acc: 0.0001
+  down_size: 0.25
+  beam_err: 0.01
+  dept_err: 0.01
+  voxel_size: 4
+  min_eigen_value: 0.01
+  degrade_bound: 100
+  point_notime: 0
+
+LocalBA:
+  win_size: 10
+  max_layer: 2
+  cov_gyr: 0.01
+  cov_acc: 1
+  rdw_gyr: 0.0001
+  rdw_acc: 0.0001
+  min_ba_point: 1
+  plane_eigen_value_thre: [4.0, 4.0, 4.0, 4.0]
+  imu_coef: 0.0001
+  thread_num: 5
+
+Loop:
+  # The criterion for loop closure
+  jud_default: 0.4
+  # The criterion for ICP to ensure the success of two scans matching
+  icp_eigval: 9
+  # The threshold for the ratio of drift and travelling distance
+  ratio_drift: 0.01
+  curr_halt: 10
+  prev_halt: 10
+  # In previous map, accumulate acsize scans to generate BTC descriptor
+  acsize: 2
+  mgsize: 2
+  # The parameters of BTC in normal and high altitude environment are different
+  isHighFly: 0
+
+GBA:
+  # GBA use the coarse-to-fine strategy
+  # These are the coarse parameters
+  voxel_size: 15
+  min_eigen_value: 10
+  eigen_value_array: [2.0, 2.0, 2.0, 2.0]
+  total_max_iter: 10

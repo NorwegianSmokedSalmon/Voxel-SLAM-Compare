@@ -1,0 +1,94 @@
+General:
+  # 根据当前运行的session修改topic
+  # Alpha: 
+  # lid_topic: "/Alpha/velodyne_points"
+  # imu_topic: "/Alpha/imu/data"
+  # Bob: 
+  lid_topic: "/Bob/velodyne_points"
+  imu_topic: "/Bob/imu/data"
+  # Carol
+  # lid_topic: "/Carol/velodyne_points"  
+  # imu_topic: "/Carol/imu/data"     
+  # The file path of the map to be saved
+  save_path: "/root/FASTLIO/Voxel-SLAM_S3E/S3E_Tunnel/"
+  # The offline map in the save_path to be loaded
+  # The number after the map name is the threshold for loop
+  # '#' means the map is not loaded
+  # 运行顺序：alpha -> bob -> carol
+  # 运行alpha时：previous_map为空或注释掉
+  # 运行bob时：previous_map: "alpha: 0.50"
+  # 运行carol时：previous_map: "alpha: 0.50, bob: 0.45"
+  # previous_map: ""
+  previous_map: "alpha: 0.50"
+  # previous_map: "alpha: 0.50, bob: 0.5"
+  # The session name (alpha, bob, or carol)
+  bagname: "bob"
+  lidar_type: 1  # velodyne
+  blind: 2.8
+  point_filter_num: 3
+  # 根据当前session修改外参
+  # Alpha外参（需要填写实际值）
+  # extrinsic_tran: [0.047665376129920, -0.144120962294238, 0.010086423805523]  
+  # extrinsic_rota: [0.999457092910121, -0.031581578016513, 0.009387179146325,
+  #                   0.031588741556450, 0.999500765853014, -6.154009751693067e-04,
+  #                   -0.009363056101964, 9.115931250498338e-04, 0.999955754029662] 
+  # Bob外参（运行bob session时需要修改为bob的外参）
+  extrinsic_tran: [0.049603512631594, -0.092737045313503, 0.015313004887488]  
+  extrinsic_rota: [0.999788733066439, -0.011076602750357, 0.017314410031844,
+                  0.011161790315359, 0.999926027879647, -0.004831549793495,
+                  -0.017259609709402, 0.005023788111429, 0.999838422528471] 
+  # Carol外参（运行carol session时需要修改为carol的外参）
+  # extrinsic_tran: [0.007784371906518, -0.204024496061082, -0.029045411719168]  
+  # extrinsic_rota: [0.999555271477470, -0.022144088840141, 0.019972284013500,
+  #                 0.021811658159079, 0.999622421673814, 0.016711502850279,
+  #                 -0.020334812152698, -0.016268440573027, 0.999660862885093]  
+  # The session is saved in save_path + bagname
+  is_save_map: 1
+
+Odometry:
+  cov_gyr: 0.01
+  cov_acc: 1
+  rdw_gyr: 0.0001
+  rdw_acc: 0.0001
+  down_size: 0.25
+  beam_err: 0.01
+  dept_err: 0.01
+  voxel_size: 2
+  min_eigen_value: 0.01
+  degrade_bound: 100
+  point_notime: 0
+
+LocalBA:
+  win_size: 10
+  max_layer: 2
+  cov_gyr: 0.01
+  cov_acc: 1
+  rdw_gyr: 0.0001
+  rdw_acc: 0.0001
+  min_ba_point: 1
+  plane_eigen_value_thre: [4.0, 4.0, 4.0, 4.0]
+  imu_coef: 0.0001
+  thread_num: 5
+
+Loop:
+  # The criterion for loop closure
+  jud_default: 0.45
+  # The criterion for ICP to ensure the success of two scans matching
+  icp_eigval: 15
+  # The threshold for the ratio of drift and travelling distance
+  ratio_drift: 0.01
+  curr_halt: 10
+  prev_halt: 10
+  # In previous map, accumulate acsize scans to generate BTC descriptor
+  acsize: 2
+  mgsize: 2
+  # The parameters of BTC in normal and high altitude environment are different
+  isHighFly: 0
+
+GBA:
+  # GBA use the coarse-to-fine strategy
+  # These are the coarse parameters
+  voxel_size: 2
+  min_eigen_value: 0.01
+  eigen_value_array: [9.0, 9.0, 9.0, 9.0]
+  total_max_iter: 3

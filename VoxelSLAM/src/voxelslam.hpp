@@ -149,7 +149,9 @@ bool sync_packages(pcl::PointCloud<PointType>::Ptr &pl_ptr, deque<sensor_msgs::I
 
   if(imu_buf.empty())
   {
-    printf("imu buf empty\n"); exit(0);
+    // 如果IMU缓冲区为空，等待而不是直接退出（可能是rosbag还在播放但数据暂时未到达）
+    // printf("imu buf empty, waiting...\n");
+    return false;
   }
 
   pl_ready = false;

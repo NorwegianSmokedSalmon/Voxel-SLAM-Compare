@@ -45,7 +45,7 @@ public:
     if(last_pcl_end_time - pcl_beg_time > 0.01)
     {
       printf("%lf %lf\n", pcl_beg_time, last_pcl_end_time);
-      printf("LiDAR time regress. Please check data\n"); exit(0);
+      printf("LiDAR time regress. Please check data\n");   //  exit(0);   // Jack
     }
 
     imu_poses.clear();

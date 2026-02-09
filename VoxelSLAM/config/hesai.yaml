@@ -2,16 +2,16 @@ General:
   lid_topic: "/hesai/pandar"
   imu_topic: "/alphasense/imu"
   # The file path of the map to be saved
-  save_path: "/home/zale/save_datas/hilti_multi/"
+  save_path: "/root/FASTLIO/LEMON-Mapping/Benchmark/Voxel-SLAM_ws/hilti_multi/"
   # The offline map in the save_path to be loaded
   # The number after the map name is the threshold for loop
   # '#' means the map is not loaded
-  previous_map: "# site1_handheld_5: 0.50, 
-                 # site1_handheld_4: 0.45,
-                 # site1_handheld_3: 0.30,
-                 # site1_handheld_2: 0.50"
+  previous_map: " site1_handheld_5: 0.50, 
+                  site1_handheld_4: 0.45,
+                  site1_handheld_3: 0.30,
+                  site1_handheld_2: 0.50"
   # The bag name played in this run
-  bagname: "site1_handheld_5"
+  bagname: "site1_handheld_1"
   lidar_type: 3
   blind: 0.7
   point_filter_num: 1
@@ -20,7 +20,7 @@ General:
                   -1, 0, 0, 
                    0, 0,-1]
   # The session is saved in save_path + bagname
-  is_save_map: 0
+  is_save_map: 1
 
 Odometry:
   cov_gyr: 0.01

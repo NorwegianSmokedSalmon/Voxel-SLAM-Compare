@@ -169,6 +169,17 @@ public:
       ap.x = pw.pnt[0]; ap.y = pw.pnt[1]; ap.z = pw.pnt[2];
       pl_save.push_back(ap);
     }
+    // 确保目录存在
+    if(access(savename.c_str(), X_OK) == -1)
+    {
+      string cmd = "mkdir -p " + savename;
+      int ss = system(cmd.c_str());
+      if(ss != 0)
+      {
+        printf("Error: Failed to create directory: %s\n", savename.c_str());
+        return;
+      }
+    }
     string pcdname = savename + "/" + to_string(count) + ".pcd";
     pcl::io::savePCDFileBinary(pcdname, pl_save); 
   }
@@ -195,6 +206,23 @@ public:
     }
     posfile.close();
 
+  }
+
+  // Save pose before PGO optimization, format: x y z qw qx qy qz
+  void save_pose_before_pgo(vector<ScanPose*> &bbuf, string &fname, string posename, string &savepath)
+  {
+    if(bbuf.size() < 100) return;
+    int topsize = bbuf.size();
+
+    ofstream posfile(savepath + fname + posename);
+    for(int i=0; i<topsize; i++)
+    {
+      IMUST &xx = bbuf[i]->x;
+      Eigen::Quaterniond qq(xx.R);
+      posfile << fixed << setprecision(7) << xx.p[0] << " " << xx.p[1] << " " << xx.p[2] << " ";
+      posfile << qq.w() << " " << qq.x() << " " << qq.y() << " " << qq.z() << endl;
+    }
+    posfile.close();
   }
 
   // The loop clousure edges of multi sessions
@@ -406,40 +434,6 @@ public:
     vector<int> ids_all;
     for(int fn=0; fn<fnames.size() && n.ok(); fn++)
       ids_all.push_back(fn);
-
-    // gtsam::Values initial;
-    // gtsam::NonlinearFactorGraph graph;
-    // vector<int> ids_cnct, stepsizes;
-    // Eigen::Matrix<double, 6, 1> v6_init;
-    // v6_init << 1e-4, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4;
-    // gtsam::noiseModel::Diagonal::shared_ptr odom_noise = gtsam::noiseModel::Diagonal::Variances(gtsam::Vector(v6_init));
-    // build_graph(initial, graph, ids_all.back(), edges, odom_noise, ids_cnct, stepsizes, 1);
-
-    // gtsam::ISAM2Params parameters;
-    // parameters.relinearizeThreshold = 0.01;
-    // parameters.relinearizeSkip = 1;
-    // gtsam::ISAM2 isam(parameters);
-    // isam.update(graph, initial);
-
-    // for(int i=0; i<5; i++) isam.update();
-    // gtsam::Values results = isam.calculateEstimate();
-    // int resultsize = results.size();
-    // int idsize = ids_cnct.size();
-    // for(int ii=0; ii<idsize; ii++)
-    // {
-    //   int tip = ids_cnct[ii];
-    //   for(int j=stepsizes[ii]; j<stepsizes[ii+1]; j++)
-    //   {
-    //     int ord = j - stepsizes[ii];
-    //     multimap_scanPoses[tip]->at(ord)->set_state(results.at(j).cast<gtsam::Pose3>());
-    //   }
-    // }
-    // for(int ii=0; ii<idsize; ii++)
-    // {
-    //   int tip = ids_cnct[ii];
-    //   for(Keyframe *kf: *multimap_keyframes[tip])
-    //     kf->x0 = multimap_scanPoses[tip]->at(kf->id)->x;
-    // }
 
     ResultOutput::instance().pub_global_path(multimap_scanPoses, pub_prev_path, ids_all);
     ResultOutput::instance().pub_globalmap(multimap_keyframes, ids_all, pub_pmap);
@@ -758,6 +752,7 @@ public:
   vector<string> sessionNames;
   string bagname, savepath;
   int is_save_map;
+  int save_pose_before_pgo_flag;
 
   VOXEL_SLAM(ros::NodeHandle &n)
   {
@@ -777,6 +772,7 @@ public:
     n.param<vector<double>>("General/extrinsic_tran", vecT, vector<double>());
     n.param<vector<double>>("General/extrinsic_rota", vecR, vector<double>());
     n.param<int>("General/is_save_map", is_save_map, 0);
+    n.param<int>("General/save_pose_before_pgo", save_pose_before_pgo_flag, 0);
 
     sub_imu = n.subscribe(imu_topic, 80000, imu_handler);
     if(feat.lidar_type == LIVOX)
@@ -835,7 +831,7 @@ public:
     int ss = 0;
     if(access((savepath+bagname+"/").c_str(), X_OK) == -1)
     {
-      string cmd = "mkdir " + savepath + bagname + "/";
+      string cmd = "mkdir -p " + savepath + bagname + "/";
       ss = system(cmd.c_str());
     }
     else
@@ -1462,7 +1458,9 @@ public:
     int counter = 0;
 
     pcl::PointCloud<PointType>::Ptr pcl_curr(new pcl::PointCloud<PointType>());
-    int motion_init_flag = 1;
+    int skip_init = 0;
+    n.param<int>("Odometry/skip_init", skip_init, 0);
+    int motion_init_flag = skip_init ? 0 : 1;
     pl_tree.reset(new pcl::PointCloud<PointType>());
     vector<pcl::PointCloud<PointType>::Ptr> pl_origs;
     vector<double> beg_times;
@@ -1570,6 +1568,23 @@ public:
       {
         if(odom_ekf.process(x_curr, *pcl_curr, imus) == 0)
           continue;
+        
+        // 当跳过初始化时，确保x_curr有合理的初始状态
+        if(skip_init && win_count == 0)
+        {
+          // 设置初始状态（只在第一次scan时设置）
+          if(x_curr.p.norm() < 0.1)
+          {
+            x_curr.p = Eigen::Vector3d(0, 0, 30);
+            x_curr.R.setIdentity();
+            x_curr.v.setZero();
+            x_curr.g = -odom_ekf.mean_acc * odom_ekf.scale_gravity;
+            x_curr.bg.setZero();
+            x_curr.ba.setZero();
+            x_curr.cov.setIdentity();
+            x_curr.cov *= 0.01;
+          }
+        }
 
         pcl::PointCloud<PointType> pl_down = *pcl_curr;
         down_sampling_voxel(pl_down, down_size);
@@ -1588,7 +1603,17 @@ public:
           if(degrade_cnt > 0) degrade_cnt--;
         }
         else
-          degrade_cnt++;
+        {
+          // 当跳过初始化时，在前几个scan中不增加degrade_cnt，给系统时间建立地图
+          if(skip_init && win_count < win_size)
+          {
+            // 前几个scan不增加degrade_cnt
+          }
+          else
+          {
+            degrade_cnt++;
+          }
+        }
 
         pwld.clear();
         pvec_update(pptr, x_curr, pwld);
@@ -1783,6 +1808,13 @@ public:
       }
     }
 
+    // 添加所有回环边（lpedge_enable=1时只添加涉及ids中session的回环边）
+    // 
+    // 重要：这里使用的是lp_edges中存储的原始相对变换
+    // - edge.rots[i]和edge.tras[i]是在检测到回环时通过ICP计算得到的相对变换
+    // - 这些变换是固定的，不会因为后续优化而改变
+    // - 每次build_graph时，都使用相同的相对变换
+    // - 优化会改变pose的绝对位姿，但回环边的相对变换保持不变
     if(lpedge_enable == 1)
     for(PGO_Edge &edge: lp_edges.edges)
     {
@@ -1794,6 +1826,7 @@ public:
         {
           int id1 = mp[0] + edge.ids1[i];
           int id2 = mp[1] + edge.ids2[i];
+          // 使用lp_edges中存储的原始相对变换（固定不变）
           add_edge(id1, id2, edge.rots[i], edge.tras[i], graph, default_noise);
         }
       }
@@ -1801,17 +1834,29 @@ public:
     
   }
 
-  // The main thread of loop clousre
-  // The topDownProcess of HBA is also run here
+  // ====================================================================
+  // 回环闭合线程主函数 (thd_loop_closure)
+  // ====================================================================
+  // 功能：增量式回环检测与位姿图优化
+  // 
+  // 核心流程：
+  // 1. 从buf_lba2loop中逐个取出ScanPose，添加到pose graph
+  // 2. 当累积足够pose时，生成keyframe和STDesc描述子
+  // 3. 使用STDesc描述子进行回环检测（SearchLoop）
+  // 4. 使用ICP进行outlier rejection（icp_normal）
+  // 5. 计算坐标系对齐变换（loop_transform）
+  // 6. 根据条件触发图重建（build_graph）和优化（ISAM2）
+  // ====================================================================
   void thd_loop_closure(ros::NodeHandle &n)
   {
     pl_kdmap.reset(new pcl::PointCloud<PointType>);
-    vector<STDescManager*> std_managers;
-    PGO_Edges lp_edges;
+    vector<STDescManager*> std_managers;  // 每个session的STDesc管理器
+    PGO_Edges lp_edges;  // 存储所有回环边
 
-    double jud_default = 0.45, icp_eigval = 14;
-    double ratio_drift = 0.05;
-    int curr_halt = 10, prev_halt = 30;
+    // ========== 参数初始化 ==========
+    double jud_default = 0.45, icp_eigval = 14;  // jud_default: STDesc匹配分数阈值; icp_eigval: ICP特征值阈值（用于outlier rejection）
+    double ratio_drift = 0.05;  // 漂移比例阈值：drift_p / span < ratio_drift 才接受回环
+    int curr_halt = 10, prev_halt = 30;  // 当前session和之前session的回环计数阈值
     int isHighFly = 0;
     n.param<double>("Loop/jud_default", jud_default, 0.45);
     n.param<double>("Loop/icp_eigval", icp_eigval, 14);
@@ -1822,34 +1867,37 @@ public:
     ConfigSetting config_setting;
     read_parameters(n, config_setting, isHighFly);
 
-    vector<double> juds;
+    // ========== 加载之前的session数据 ==========
+    vector<double> juds;  // 每个session的STDesc匹配分数阈值
     FileReaderWriter::instance().previous_map_names(n, sessionNames, juds);
-    FileReaderWriter::instance().pgo_edges_io(lp_edges, sessionNames, 0, savepath, bagname);
+    FileReaderWriter::instance().pgo_edges_io(lp_edges, sessionNames, 0, savepath, bagname);  // 加载之前的回环边
     FileReaderWriter::instance().previous_map_read(std_managers, multimap_scanPoses, multimap_keyframes, config_setting, lp_edges, n, sessionNames, juds, savepath, win_size);
     
-    STDescManager *std_manager = new STDescManager(config_setting);
+    // ========== 初始化当前session ==========
+    STDescManager *std_manager = new STDescManager(config_setting);  // 当前session的STDesc管理器
     sessionNames.push_back(bagname);
     std_managers.push_back(std_manager);
     multimap_scanPoses.push_back(scanPoses);
     multimap_keyframes.push_back(keyframes);
     juds.push_back(jud_default);
-    vector<double> jours(std_managers.size(), 0);
+    vector<double> jours(std_managers.size(), 0);  // 每个session的累计里程
 
-    vector<int> relc_counts(std_managers.size(), prev_halt);
+    vector<int> relc_counts(std_managers.size(), prev_halt);  // 回环计数器，用于控制优化频率
     
-    deque<ScanPose*> bl_local;
+    // ========== GTSAM图优化初始化 ==========
+    deque<ScanPose*> bl_local;  // 局部buffer，用于生成keyframe
     Eigen::Matrix<double, 6, 1> v6_init, v6_fixd;
-    v6_init << 1e-4, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4;
-    v6_fixd << 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6;
+    v6_init << 1e-4, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4;  // 里程计边噪声（相对较大）
+    v6_fixd << 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6;  // 先验因子噪声（非常小，固定第一个pose）
     gtsam::noiseModel::Diagonal::shared_ptr odom_noise = gtsam::noiseModel::Diagonal::Variances(gtsam::Vector(v6_init));
     gtsam::noiseModel::Diagonal::shared_ptr fixd_noise = gtsam::noiseModel::Diagonal::Variances(gtsam::Vector(v6_fixd));
-    gtsam::Values initial;
-    gtsam::NonlinearFactorGraph graph;
+    gtsam::Values initial;  // 位姿初始值
+    gtsam::NonlinearFactorGraph graph;  // 因子图
 
-    vector<int> ids(1, std_managers.size() - 1), stepsizes(2, 0);
+    vector<int> ids(1, std_managers.size() - 1), stepsizes(2, 0);  // ids: 当前图中的session ID列表; stepsizes: 每个session的起始索引
     pcl::PointCloud<pcl::PointXYZI>::Ptr plbtc(new pcl::PointCloud<pcl::PointXYZI>);
-    IMUST x_key;
-    int buf_base = 0;
+    IMUST x_key;  // 用于判断是否需要生成keyframe
+    int buf_base = 0;  // 当前session内的pose索引
 
     while(n.ok())
     {
@@ -1875,7 +1923,7 @@ public:
         jours.push_back(0);
 
         bagname = sessionNames.back();
-        string cmd = "mkdir " + savepath + bagname + "/";
+        string cmd = "mkdir -p " + savepath + bagname + "/";
         int ss = system(cmd.c_str());
 
         ResultOutput::instance().pub_global_path(multimap_scanPoses, pub_prev_path, ids);
@@ -1905,14 +1953,16 @@ public:
       mtx_loop.unlock();
       if(bl_head == nullptr) continue;
 
+      // ========== 步骤1: 添加新的pose到图 ==========
       int cur_id = std_managers.size() - 1;
       scanPoses->push_back(bl_head);
       bl_local.push_back(bl_head);
       IMUST xc = bl_head->x;
       gtsam::Pose3 pose3(gtsam::Rot3(xc.R), gtsam::Point3(xc.p));
-      int g_pos = stepsizes.back();
+      int g_pos = stepsizes.back();  // 全局pose索引
       initial.insert(g_pos, pose3);
 
+      // 添加里程计边（相邻pose之间的约束）
       if(g_pos > 0)
       {
         gtsam::Vector samv6(scanPoses->at(buf_base-1)->v6);
@@ -1921,6 +1971,7 @@ public:
       }
       else
       {
+        // 第一个pose添加先验因子（固定坐标系原点）
         gtsam::Pose3 pose3(gtsam::Rot3(xc.R), gtsam::Point3(xc.p));
         graph.addPrior(0, pose3, fixd_noise);
       }
@@ -1928,9 +1979,12 @@ public:
       if(buf_base == 0) x_key = xc;
       buf_base++; stepsizes.back() += 1;
 
+      // ========== 步骤2: 判断是否需要生成keyframe ==========
+      // 需要满足：1) 累积了足够多的pose (win_size); 2) 运动足够大（角度>5度或距离>0.1m）
       if(bl_local.size() < win_size) continue;
-      double ang = Log(x_key.R.transpose() * xc.R).norm() * 57.3;
-      double len = (xc.p - x_key.p).norm();
+      double ang = Log(x_key.R.transpose() * xc.R).norm() * 57.3;  // 角度变化（度）
+      double len = (xc.p - x_key.p).norm();  // 位置变化（米）
+      // 如果运动太小，跳过这个pose（不生成keyframe）
       if(ang < 5 && len < 0.1 && buf_base > win_size)
       {
         bl_local.front()->pvec = nullptr;
@@ -1938,18 +1992,38 @@ public:
         continue;
       }
       for(double &jour: jours)
-        jour += len;
+        jour += len;  // 更新每个session的累计里程
       x_key = xc;
 
+      // ========== 步骤3: 生成keyframe ==========
+      // 将win_size个pose的点云变换到当前pose的坐标系下，合并成一个keyframe
+      // 
+      // 坐标系对齐的目的：
+      // 1. bl_local中存储了win_size个连续的ScanPose，每个ScanPose都有自己的位姿和点云
+      // 2. 每个pose的点云是在各自局部坐标系下的（相对于该pose的坐标系）
+      // 3. 为了生成一个统一的keyframe用于回环检测，需要将所有pose的点云变换到同一个坐标系
+      // 4. 选择当前pose（xc）的坐标系作为统一坐标系
+      // 
+      // 坐标系对齐的数学原理：
+      // - delta_R = xc.R^T * bl.x.R：从bl的坐标系到xc坐标系的旋转
+      // - delta_p = xc.R^T * (bl.x.p - xc.p)：从bl的坐标系到xc坐标系的平移
+      // - 变换公式：p_xc = delta_R * p_bl + delta_p
+      //   其中p_bl是bl坐标系下的点，p_xc是xc坐标系下的点
+      // 
+      // 为什么需要坐标系对齐：
+      // - 不同pose的点云在不同坐标系下，无法直接合并
+      // - 统一到当前pose的坐标系后，可以合并成一个完整的keyframe点云
+      // - 这个keyframe点云用于生成STDesc描述子，进行回环检测
       PVecPtr pptr(new PVec);
       for(int i=0; i<win_size; i++)
       {
         ScanPose &bl = *bl_local[i];
-        Eigen::Vector3d delta_p = xc.R.transpose() * (bl.x.p - xc.p);
-        Eigen::Matrix3d delta_R = xc.R.transpose() *  bl.x.R;
+        // 坐标系对齐：将bl的点云变换到xc坐标系下
+        Eigen::Vector3d delta_p = xc.R.transpose() * (bl.x.p - xc.p);  // 平移：bl坐标系原点在xc坐标系中的位置
+        Eigen::Matrix3d delta_R = xc.R.transpose() *  bl.x.R;         // 旋转：从bl坐标系到xc坐标系的旋转矩阵
         for(pointVar pv: *(bl.pvec))
         {
-          pv.pnt = delta_R * pv.pnt + delta_p;
+          pv.pnt = delta_R * pv.pnt + delta_p;  // 点云坐标变换：从bl坐标系变换到xc坐标系
           pptr->push_back(pv);
         }
       }
@@ -1959,6 +2033,7 @@ public:
         bl_local.pop_front();
       }
 
+      // 创建keyframe并下采样点云
       Keyframe *smp = new Keyframe(xc);
       smp->id = buf_base - 1;
       smp->jour = jours[cur_id];
@@ -1976,16 +2051,25 @@ public:
       keyframes->push_back(smp);
       mtx_keyframe.unlock();
 
+      // ========== 步骤4: 生成STDesc描述子并检测回环 ==========
+      // STDesc (Stable Triangle Descriptor): 基于稳定三角形结构的描述子
+      // 生成过程：点云 -> 体素化 -> 平面检测 -> 二进制描述子提取 -> 稳定三角形描述子
       vector<STD> stds_vec;
       std_manager->GenerateSTDescs(plbtc, stds_vec, buf_base-1);
-      pair<int, double> search_result(-1, 0);
-      pair<Eigen::Vector3d, Eigen::Matrix3d> loop_transform;
+      pair<int, double> search_result(-1, 0);  // <候选keyframe ID, 匹配分数>
+      pair<Eigen::Vector3d, Eigen::Matrix3d> loop_transform;  // 回环变换：<translation, rotation>
       vector<pair<STD, STD>> loop_std_pair;
 
-      bool isGraph = false, isOpt = false;
+      bool isGraph = false, isOpt = false;  // isGraph: 是否需要重建图; isOpt: 是否需要优化
       int match_num = 0;
+      // 遍历所有session（包括当前session）进行回环检测
       for(int id=0; id<=cur_id; id++)
       {
+        // ========== 回环检测：使用STDesc描述子匹配 ==========
+        // SearchLoop内部流程：
+        // 1. candidate_selector: 使用hash表快速查找候选keyframe（默认50个）
+        // 2. candidate_verify: 对每个候选进行验证，计算相对位姿和匹配分数
+        // 3. 返回最佳匹配的keyframe ID和匹配分数
         std_managers[id]->SearchLoop(stds_vec, search_result, loop_transform, loop_std_pair, std_manager->plane_cloud_vec_.back());
 
         if(search_result.first >= 0)
@@ -1994,36 +2078,99 @@ public:
           printf("score: %lf\n", search_result.second);
         }
 
+        // ========== 步骤5: Outlier Rejection ==========
+        // 条件1: STDesc匹配分数 > juds[id] (默认0.45)
         if(search_result.first >= 0 && search_result.second > juds[id])
         {
+          // 条件2: ICP验证（使用平面点云进行ICP，进一步验证回环）
+          // icp_normal函数：
+          // - 输入：当前keyframe的平面点云、候选keyframe的平面点云、初始变换loop_transform
+          // - 过程：迭代优化变换（最多20次），使用点到平面距离和法向量一致性进行匹配
+          // - 输出：优化后的loop_transform，返回值表示是否通过验证
+          // - 验证条件：1) ICP收敛; 2) 法向量矩阵的最小特征值 > icp_eigval (默认14)
+          //   特征值大说明匹配点分布良好，约束充分，不是outlier
           if(icp_normal(*(std_manager->plane_cloud_vec_.back()), *(std_managers[id]->plane_cloud_vec_[search_result.first]), loop_transform, icp_eigval))
           {
             int ord_bl = std_managers[id]->plane_cloud_vec_[search_result.first]->header.seq;
 
+            // ========== 步骤6: 计算坐标系对齐后的漂移 ==========
+            // loop_transform是候选keyframe到当前keyframe的变换（在候选keyframe的局部坐标系下）
+            // 将loop_transform变换到全局坐标系：xx.R * loop_transform.first + xx.p
+            // 然后计算与当前pose xc.p的距离，作为漂移drift_p
             IMUST &xx = multimap_scanPoses[id]->at(ord_bl)->x;
             double drift_p = (xx.R * loop_transform.first + xx.p - xc.p).norm();
 
-            bool isPush = false;
-            int step = -1;
+            // ========== 步骤7: 判断是否接受回环并触发优化 ==========
+            // 
+            // 优化触发条件（按优先级排序）：
+            // 
+            // 【情况1】新session回环 (step == -1)
+            //   - 条件：检测到与不在当前图中的session的回环
+            //   - 动作：立即触发图重建(isGraph = true) 和优化(isOpt = true)
+            //   - 说明：必须重建图以包含新session，并立即优化对齐坐标系
+            //   - 特点：无条件立即优化（一次回环优化一次）
+            // 
+            // 【情况2】当前session内回环
+            //   - 条件：relc_counts[id] > curr_halt (默认10) 且 drift_p > 0.10
+            //   - 动作：触发优化(isOpt = true)
+            //   - 说明：当前session内的回环更可靠，使用较小阈值，更频繁优化
+            //   - 特点：不是每次回环都优化，需要累积10个回环且漂移>0.10米才优化
+            // 
+            // 【情况3】跨session回环（已存在session）
+            //   - 条件：relc_counts[id] > prev_halt (默认30) 且 drift_p > 0.25
+            //   - 动作：触发优化(isOpt = true)
+            //   - 说明：跨session回环相对不可靠，使用较大阈值，避免频繁优化
+            //   - 特点：不是每次回环都优化，需要累积30个回环且漂移>0.25米才优化
+            // 
+            // 按顺序跑session时的优化行为：
+            // - Session0：只添加pose和里程计边，不优化（第一个session）
+            // - Session1检测到与Session0的第一个回环：情况1，立即优化（一次回环优化一次）
+            // - Session1继续运行，检测到Session1内部回环：情况2，累积10个回环且漂移>0.10米才优化
+            // - Session1继续运行，检测到与Session0的回环：情况3，累积30个回环且漂移>0.25米才优化
+            // - Session2检测到与Session0/1的第一个回环：情况1，立即优化（一次回环优化一次）
+            // - Session2继续运行，后续回环：情况2或情况3，需要满足条件才优化
+            // 
+            bool isPush = false;  // 是否将回环边添加到图
+            int step = -1;  // 候选session在当前图中的索引（-1表示不在图中）
+            
             if(id == cur_id)
             {
-              double span = smp->jour - keyframes->at(search_result.first)->jour;
+              // ========== 当前session内的回环（intra-session loop） ==========
+              // 特点：回环的两个keyframe都在同一个session内（当前运行的session）
+              // 例如：session1在运行过程中，检测到session1内部的回环
+              // 
+              // 漂移检查：使用回环跨度（span）作为参考
+              double span = smp->jour - keyframes->at(search_result.first)->jour;  // 回环跨度（里程）
               printf("drift: %lf %lf\n", drift_p, span);
 
+              // 漂移比例检查：drift_p / span < ratio_drift (默认0.05)
+              // 如果漂移相对于回环跨度很小，接受回环
+              // 注意：这里用span（回环跨度）而不是jours[id]（session累计里程）
               if(drift_p / span < ratio_drift)
               {
                 isPush = true;
-                step = stepsizes.size() - 2;
+                step = stepsizes.size() - 2;  // 当前session在stepsizes中的索引
 
+                // ========== 【情况2】优化触发条件：当前session内回环 ==========
+                // 触发条件：
+                // 1. relc_counts[id] > curr_halt (默认10) - 回环计数器阈值较小
+                // 2. drift_p > 0.10 - 漂移阈值较小（0.10米）
+                // 
+                // 设计原因：
+                // - 当前session内的回环更可靠（同一个传感器，环境变化小）
+                // - 回环跨度span通常较小，漂移相对容易检测
+                // - 使用较小的阈值可以更频繁地优化，及时纠正累积误差
                 if(relc_counts[id] > curr_halt && drift_p > 0.10)
                 {
                   isOpt = true;
-                  for(int &cnt: relc_counts) cnt = 0;
+                  for(int &cnt: relc_counts) cnt = 0;  // 重置所有session的回环计数
                 }
               }
             }
             else
             {
+              // ========== 跨session的回环（inter-session loop） ==========
+              // 检查候选session是否已经在当前图中
               for(int i=0; i<ids.size(); i++)
                 if(id == ids[i]) 
                   step = i;
@@ -2032,19 +2179,63 @@ public:
 
               if(step == -1)
               {
-                isGraph = true;
-                isOpt = true;
+                // ========== 【情况1】新session回环 (step == -1) ==========
+                // 特点：检测到与不在当前图中的session的回环
+                // 例如：当前运行session1，load了session0的地图，检测到第一个跨session回环
+                // 此时session0不在ids中（ids=[1]），step=-1
+                // 
+                // 处理方式：立即触发图重建和优化（无条件）
+                // - build_graph会通过lp_edges.connect找到所有相关session（包括session0）
+                // - 重建整个pose graph，包含所有相关session的pose和边
+                // - 然后通过PGO优化实现坐标系对齐（不是简单乘一个变换）
+                // - 优化会同时调整所有相关session的位姿，使它们对齐到统一的全局坐标系
+                // 
+                // 与情况2、情况3的区别：
+                // - 情况1：无条件立即优化（新session必须立即对齐）
+                // - 情况2：有条件优化（需要满足计数和漂移阈值）
+                // - 情况3：有条件优化（需要满足更高的计数和漂移阈值）
+                isGraph = true;  // 触发图重建
+                isOpt = true;    // 触发优化（立即优化，不等待）
                 relc_counts[id] = 0;
                 g_update = 1;
                 isPush = true;
-                jours[id] = 0;
+                jours[id] = 0;  // 重置该session的里程计数
               }
               else
               {
+                // ========== 【情况3】跨session回环（已存在的session） ==========
+                // 特点：回环的两个keyframe在不同session之间，且候选session已经在当前图中
+                // 例如：session1在运行，检测到与session0的回环，session0已经在图中
+                // 
+                // 漂移检查：使用session累计里程（jours[id]）作为参考
+                // 漂移比例检查：drift_p / jours[id] < 0.05
+                // 如果漂移相对于session累计里程很小，接受回环
+                // 注意：这里用jours[id]（session累计里程）而不是span（回环跨度）
                 if(drift_p / jours[id] < 0.05)
                 {
                   jours[id] = 1e-6; // set to 0
                   isPush = true;
+                  
+                  // ========== 【情况3】优化触发条件：跨session回环（已存在的session） ==========
+                  // 触发条件：
+                  // 1. relc_counts[id] > prev_halt (默认30) - 回环计数器阈值较大
+                  // 2. drift_p > 0.25 - 漂移阈值较大（0.25米）
+                  // 
+                  // 设计原因：
+                  // - 跨session的回环相对不可靠（不同时间、不同传感器状态、环境可能变化）
+                  // - session累计里程jours[id]通常很大，漂移相对难以检测
+                  // - 使用较大的阈值可以避免频繁优化，减少计算开销
+                  // - 只有当累积了足够多的回环（30个）且漂移较大（0.25米）时才优化
+                  // 
+                  // 与情况1的区别：
+                  // - 情况1：无条件立即优化（新session必须立即对齐）
+                  // - 情况3：有条件优化（需要满足更高的计数和漂移阈值）
+                  // 
+                  // 与情况2的区别：
+                  // 1. 回环类型：情况2是同一session内，情况3是跨session
+                  // 2. 计数阈值：情况2用curr_halt (10)，情况3用prev_halt (30) - 情况3更严格
+                  // 3. 漂移阈值：情况2用0.10米，情况3用0.25米 - 情况3更宽松
+                  // 4. 漂移参考：情况2用span（回环跨度），情况3用jours[id]（session累计里程）
                   if(relc_counts[id] > prev_halt && drift_p > 0.25)
                   {
                     isOpt = true;
@@ -2055,17 +2246,46 @@ public:
 
             }
 
+            // ========== 步骤8: 添加回环边到图 ==========
             if(isPush)
             {
               match_num++;
+              // 保存回环边到lp_edges（永久存储，不会丢失）
+              // lp_edges是全局的，存储了所有历史回环边，用于后续的build_graph
+              // 
+              // 重要：回环约束的齐次变换（相对变换）是固定的，不会因为优化而改变
+              // - loop_transform是在检测到回环时通过ICP计算得到的相对变换（rotation和translation）
+              // - 这个相对变换会被永久存储在lp_edges中，每次优化时都使用相同的变换
+              // - 优化会改变两个pose的绝对位姿，但回环边的相对变换保持不变
+              // 
+              // 示例：
+              // - 第一个回环：检测到Session0的pose A和Session1的pose B之间的相对变换T_AB
+              // - T_AB被存储在lp_edges中，是固定的
+              // - 第一次优化：调整pose A和B的绝对位姿，但T_AB不变
+              // - 第二次优化：再次调整pose A和B的绝对位姿，但T_AB仍然不变
+              // - 约束：优化后的pose A和B必须满足 T_AB = T_B^{-1} * T_A（相对变换不变）
               lp_edges.push(id, cur_id, ord_bl, buf_base-1, loop_transform.second, loop_transform.first, v6_init);
+              
+              // 如果候选session已经在当前图中（step > -1），直接添加回环边到当前graph
+              // 注意：loop_transform是坐标系对齐后的变换，已经通过ICP优化
+              // 这个变换会被直接使用，不会因为后续优化而改变
               if(step > -1)
               {
-                int id1 = stepsizes[step] + ord_bl;
-                int id2 = stepsizes.back() - 1;
+                int id1 = stepsizes[step] + ord_bl;  // 候选pose的全局索引
+                int id2 = stepsizes.back() - 1;      // 当前pose的全局索引
                 add_edge(id1, id2, loop_transform.second, loop_transform.first, graph, odom_noise);
                 printf("addedge: (%d %d) (%d %d)\n", id, cur_id, ord_bl, buf_base-1);
               }
+              // 如果step == -1（新session），回环边会在build_graph中添加
+              // 
+              // 重要说明：
+              // - 回环边会被永久保存在lp_edges中，不会丢失
+              // - 回环边的相对变换（rotation和translation）是固定的，不会因为优化而改变
+              // - 当isGraph=true时，build_graph会重新构建graph，包括所有lp_edges中的回环边
+              // - 每次build_graph时，都使用lp_edges中存储的原始相对变换
+              // - 当isGraph=false时，graph继续增量添加，回环边只在检测到新回环时添加
+              // - 优化后，graph结构不会改变，回环边仍然在graph中（直到下次build_graph）
+              // - 优化会改变pose的绝对位姿，但回环边的相对变换保持不变
             }
 
             // if(isPush)
@@ -2077,39 +2297,138 @@ public:
         }
         
       }
+      // ========== 更新回环计数器 ==========
+      // 每个pose处理完后，所有session的回环计数器+1
+      // 这个计数器用于控制优化频率：
+      // - 情况2（当前session内回环）：需要累积10个回环才可能触发优化
+      // - 情况3（跨session回环）：需要累积30个回环才可能触发优化
+      // - 当优化触发时，计数器会被重置为0（见上面的代码）
+      // 注意：情况1（新session回环）不依赖这个计数器，立即优化
       for(int &it: relc_counts) it++;
+      // 将当前keyframe的STDesc添加到数据库中（用于后续回环检测）
       std_manager->AddSTDescs(stds_vec);
   
+      // ========== 步骤9: 图重建（如果需要） ==========
+      // 当检测到新session的回环时（step == -1），需要重建整个图
+      // 
+      // build_graph会：
+      // 1. lp_edges.connect(cur_id, ids): 从当前session开始，通过回环边递归找到所有相关session
+      //    connect函数的工作原理：
+      //    - 从root（当前session）开始，通过mates邻接表递归查找所有通过回环边连接的session
+      //    - mates[i]存储了与session i有回环边的所有session
+      //    - 递归遍历：如果session A和session B有回环，B和C有回环，那么A、B、C都会被加入ids
+      //    
+      //    示例1：session1检测到与session0的回环
+      //    - 如果session0和session1有回环 → ids = [0, 1]
+      //    
+      //    示例2：session2检测到与session0的回环
+      //    - 如果session2和session0有回环，且session0和session1有回环 → ids = [0, 1, 2]
+      //    - 如果session2和session0有回环，但session1和session0、session2都没有回环 → ids = [0, 2]
+      //    - 关键：只有通过回环边"连通"的session才会被加入ids
+      //    
+      // 2. 将所有相关session的pose添加到initial（使用当前位姿作为初始值）
+      // 3. 添加所有里程计边（每个session内部的pose之间）
+      // 4. 添加所有回环边（lpedge_enable=1时只添加涉及ids中session的回环边）
+      //    - 注意：这里会从lp_edges中读取所有历史回环边，包括之前优化过的回环边
+      //    - 回环边不会被"拿掉"，它们会一直保留在lp_edges中
+      //    - 每次build_graph时，都会重新添加所有相关的回环边
+      // 5. 更新ids和stepsizes
+      // 
+      // 注意：坐标系对齐不是通过简单乘一个变换实现的，而是通过后续的PGO优化实现的
+      // 回环边提供了两个session之间的相对约束，优化会同时调整所有相关session的位姿
+      // 
+      // 重要：只有通过回环边"连通"的session才会被加入位姿图
+      // - 如果session1和session0、session2都没有回环，那么session1不会被加入ids
+      // - 只有通过回环边形成连通图的session才会一起优化
+      // 
+      // 优化后的位姿图结构：
+      // - graph结构不会改变，回环边仍然在graph中
+      // - 但是graph是增量构建的，每次添加新pose时都会继续添加里程计边
+      // - 回环边存储在lp_edges中（永久保存），不会丢失
+      // - 当isGraph=true时，会重建整个graph，包括所有历史回环边
+      // - 当isGraph=false时，graph继续增量添加，但只包含当前检测到的回环边
+      // - Session0和Session1通过回环边连通，不会断开，因为回环边一直保留在lp_edges中
       if(isGraph)
       {
         build_graph(initial, graph, cur_id, lp_edges, odom_noise, ids, stepsizes, 1);
       }
 
+      // ========== 步骤10: 位姿图优化 ==========
+      // 优化触发条件总结：
+      // 1. 新session回环（step == -1）：立即优化
+      // 2. 当前session内回环：relc_counts > curr_halt (10) 且 drift_p > 0.10
+      // 3. 跨session回环：relc_counts > prev_halt (30) 且 drift_p > 0.25
       if(isOpt)
       {
+        // 使用ISAM2进行增量优化
+        // 
+        // 重要：graph是增量构建的，包含所有历史回环边
+        // - 第一个回环优化后，graph中仍然保留着第一个回环的约束
+        // - 第二个回环优化时，graph中包含：
+        //   * 所有历史回环边（包括第一个回环的约束）✓
+        //   * 所有里程计边
+        //   * 新添加的回环边
+        // - ISAM2会同时优化所有约束，保持全局一致性
+        // 
+        // 示例：Session1检测到与Session0的第一个回环
+        // - graph包含：Session0的pose + Session1的pose + 里程计边 + Session0<->Session1的回环边
+        // - 优化后，graph结构不变，回环边仍然在graph中
+        // 
+        // 继续运行Session1，检测到第二个回环（比如Session1内部回环）
+        // - graph继续增量添加：新的pose + 新的里程计边 + 新的回环边
+        // - graph中仍然包含第一个回环的约束 ✓
+        // - 优化时会同时考虑所有回环约束，保持全局一致性
         gtsam::ISAM2Params parameters;
         parameters.relinearizeThreshold = 0.01;
         parameters.relinearizeSkip = 1;
         gtsam::ISAM2 isam(parameters);
-        isam.update(graph, initial);
+        isam.update(graph, initial);  // 第一次更新（graph包含所有历史回环边）
 
-        for(int i=0; i<5; i++) isam.update();
+        for(int i=0; i<5; i++) isam.update();  // 迭代优化5次
         gtsam::Values results = isam.calculateEstimate();
         int resultsize = results.size();
         
+        // 保存优化前的当前pose（用于计算坐标系变换）
         IMUST x1 = scanPoses->at(buf_base-1)->x;
         int idsize = ids.size();
 
+        // ========== 步骤11: 更新所有pose ==========
+        // 
+        // 重要：优化会同时改变当前session和历史session的位姿
+        // 
+        // ids中包含所有通过回环边连接的session（通过lp_edges.connect找到）
+        // 例如：session1检测到与session0的回环时，ids = [0, 1]
+        // 
+        // 优化过程：
+        // 1. build_graph将所有ids中的session的pose加入图（包括历史session和当前session）
+        // 2. 添加所有里程计边（每个session内部的pose之间）
+        // 3. 添加所有回环边（提供session之间的相对约束）
+        // 4. PGO优化会同时调整所有session的位姿，使它们对齐到统一的全局坐标系
+        // 
+        // 坐标系对齐的实现：
+        // - 不是只改变当前session的位姿，也不是只改变历史session的位姿
+        // - 而是同时调整所有相关session的位姿，通过回环约束实现全局一致性
+        // - 第一个session（ids[0]）的第一个pose有强先验约束（固定坐标系原点）
+        // - 其他session的位姿会相对于这个固定点进行调整
+        // 
+        // 示例：session1检测到与session0的回环
+        // - ids = [0, 1]（session0和session1都在图中）
+        // - 优化会同时调整session0和session1的所有pose
+        // - session0的第一个pose有强先验（基本不动），其他pose会调整
+        // - session1的所有pose都会调整，以对齐到session0的坐标系
         history_kfsize = 0;
+        // 更新所有ids中session的所有pose（包括历史session和当前session）
         for(int ii=0; ii<idsize; ii++)
         {
-          int tip = ids[ii];
+          int tip = ids[ii];  // tip是session ID（可能是历史session或当前session）
           for(int j=stepsizes[ii]; j<stepsizes[ii+1]; j++)
           {
             int ord = j - stepsizes[ii];
+            // 更新该session的所有pose（包括历史session的pose）
             multimap_scanPoses[tip]->at(ord)->set_state(results.at(j).cast<gtsam::Pose3>());
           }
         }
+        // 更新所有keyframe的位姿（用于后续的点云变换）
         mtx_keyframe.lock();
         for(int ii=0; ii<idsize; ii++)
         {
@@ -2119,15 +2438,21 @@ public:
         }
         mtx_keyframe.unlock();
 
+        // ========== 步骤12: 更新initial并计算坐标系变换 ==========
+        // 清空并重新填充initial（用于下次优化）
         initial.clear();
         for(int i=0; i<resultsize; i++)
           initial.insert(i, results.at(i).cast<gtsam::Pose3>());
         
+        // 计算优化前后的坐标系变换dx（用于后续点云的坐标系对齐）
+        // dx表示从优化前坐标系到优化后坐标系的变换
         IMUST x3 = scanPoses->at(buf_base-1)->x;
         dx.p = x3.p - x3.R * x1.R.transpose() * x1.p;
         dx.R = x3.R * x1.R.transpose();
         x_key = x3;
 
+        // ========== 步骤13: 更新局部地图（用于后续回环检测） ==========
+        // 将最近init_num个keyframe的点云变换到优化后的坐标系，并更新到map_loop
         PVec pvec_tem;
         int subsize = keyframes->size();
         int init_num = 5;
@@ -2138,34 +2463,37 @@ public:
           sp.exist = 0;
           pvec_tem.reserve(sp.plptr->size());
           pointVar pv; pv.var.setZero();
+          // 将keyframe的点云变换到优化后的全局坐标系（使用sp.x0，即优化后的pose）
           for(PointType &ap: sp.plptr->points)
           {
             pv.pnt << ap.x, ap.y, ap.z;
-            pv.pnt = sp.x0.R * pv.pnt + sp.x0.p;
+            pv.pnt = sp.x0.R * pv.pnt + sp.x0.p;  // 坐标系对齐：使用优化后的pose
             for(int j=0; j<3; j++)
               pv.var(j, j) = ap.normal[j];
             pvec_tem.push_back(pv);
           }
-          cut_voxel(map_loop, pvec_tem, win_size, 0);
+          cut_voxel(map_loop, pvec_tem, win_size, 0);  // 更新局部地图
         }
 
+        // ========== 步骤14: 更新keyframe的KD树（用于快速回环检测） ==========
         if(subsize > init_num)
         {
           pl_kdmap->clear();
+          // 将历史keyframe的位置添加到KD树（用于后续的快速搜索）
           for(int i=0; i<subsize-init_num; i++)
           {
             Keyframe &kf = *(keyframes->at(i));
             kf.exist = 1;
             PointType pp;
-            pp.x = kf.x0.p[0]; pp.y = kf.x0.p[1]; pp.z = kf.x0.p[2];
+            pp.x = kf.x0.p[0]; pp.y = kf.x0.p[1]; pp.z = kf.x0.p[2];  // 使用优化后的pose
             pp.intensity = cur_id; pp.curvature = i;
             pl_kdmap->push_back(pp);
           }
 
-          kd_keyframes.setInputCloud(pl_kdmap);
+          kd_keyframes.setInputCloud(pl_kdmap);  // 更新KD树
           history_kfsize = pl_kdmap->size();
         }
-        loop_detect = 1;
+        loop_detect = 1;  // 标记回环检测完成，可以继续处理下一个pose
 
         vector<int> ids2 = ids; ids2.pop_back();
         ResultOutput::instance().pub_global_path(multimap_scanPoses, pub_prev_path, ids2);
@@ -2200,6 +2528,14 @@ public:
       }
 
       int cur_id = std_managers.size() - 1;
+      
+      // Save pose before PGO optimization if enabled
+      if(save_pose_before_pgo_flag)
+      {
+        for(int i=0; i<ids.size(); i++)
+          FileReaderWriter::instance().save_pose_before_pgo(*(multimap_scanPoses[ids[i]]), sessionNames[ids[i]], "/pose.json", savepath);
+      }
+      
       build_graph(initial, graph, cur_id, lp_edges, odom_noise, ids, stepsizes, 0);
 
       topDownProcess(initial, graph, ids, stepsizes);

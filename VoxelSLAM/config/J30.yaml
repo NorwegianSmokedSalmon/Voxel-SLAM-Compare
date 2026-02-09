@@ -1,0 +1,56 @@
+General:
+  lid_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"
+  save_path: "/root/FASTLIO/Voxel-SLAM_J30/dongjiao/"
+  # previous_map: "drone0: 0.40, drone1: 0.40"
+  previous_map: ""
+  bagname: "drone2"
+  lidar_type: 0
+  blind: 0.5 # 0.5
+  point_filter_num: 3
+  extrinsic_tran: [0.09, 0.00, 0.06687]
+  extrinsic_rota:  [0.965930, 0.000000, 0.258803,
+                 0.000000, 1.000000, 0.000000,
+                 -0.258803, 0.000000, 0.965930]
+  is_save_map: 1
+  save_pose_before_pgo: 1  # 0: 不保存, 1: 保存未经过PGO优化的位姿到pose.json
+
+Odometry:
+  max_init: 50
+  skip_init: 1  # 0: 进行初始化, 1: 跳过初始化
+  cov_gyr: 0.1
+  cov_acc: 1
+  rdw_gyr: 0.0001
+  rdw_acc: 0.0001
+  # down_size: 0.5
+  down_size: 0.1
+  dept_err: 0.02
+  beam_err: 0.05
+  # voxel_size: 4
+  voxel_size: 1.5
+  min_eigen_value: 0.0025
+  degrade_bound: 10
+  point_notime: 0
+
+LocalBA:
+  win_size: 10
+  max_layer: 2
+  cov_gyr: 0.01
+  cov_acc: 2
+  rdw_gyr: 0.0001
+  rdw_acc: 0.0001
+  min_ba_point: 1
+  plane_eigen_value_thre: [4.0, 4.0, 4.0, 4.0]
+  imu_coef: 0.0002
+  thread_num: 5
+
+Loop:
+  jud_default: 0.45
+  icp_eigval: 9
+  ratio_drift: 0.01
+
+GBA:
+  voxel_size: 2
+  min_eigen_value: 0.01
+  eigen_value_array: [4.0, 4.0, 4.0, 4.0]
+  total_max_iter: 6
